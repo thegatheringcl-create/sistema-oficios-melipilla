@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema de Registro de Oficios - Melipilla Cloud</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase configuration
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        
+        // El appId identifica la base de datos única para este despliegue
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'oficios-melipilla-cloud';
+
+        // Global references for the UI
+        window.db = db;
+        window.appId = appId;
+        window.auth = auth;
+        window.deleteDoc = deleteDoc;
+        window.doc = doc;
+        window.updateDoc = updateDoc;
+        window.addDoc = addDoc;
+        window.collection = collection;
+
+        let snapshotUnsubscribe = null;
+
+        // AUTHENTICATION (Rule 3)
+        async function initAuth() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth error:", error);
+            }
+        }
+
+        // Real-time listeners (Rule 1 & 2)
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                setupSnapshotListener();
+            } else if (snapshotUnsubscribe) {
+                snapshotUnsubscribe();
+            }
+        });
+
+        function setupSnapshotListener() {
+            if (snapshotUnsubscribe) snapshotUnsubscribe();
+            
+            // Colección pública para que todos vean lo mismo sincronizado en la nube
+            const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'oficios'));
+            
+            snapshotUnsubscribe = onSnapshot(q, (snapshot) => {
+                const data = [];
+                snapshot.forEach((doc) => {
+                    data.push({ id_db: doc.id, ...doc.data() });
+                });
+                
+                // Ordenamos por fecha de creación (localmente)
+                window.requests = data.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+                
+                // Refrescar UI si el usuario ya está dentro
+                if (window.currentUser) {
+                    renderTable();
+                    updateFinancialSummary();
+                }
+                
+                // Ocultar cargador
+                const loader = document.getElementById('loading-overlay');
+                if (loader) {
+                    loader.classList.add('opacity-0');
+                    setTimeout(() => loader.style.display = 'none', 500);
+                }
+            }, (error) => {
+                console.error("Error de permisos en Firestore:", error);
+            });
+        }
+
+        window.onload = initAuth;
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .login-bg { background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%); }
+        .status-ingresado { background-color: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
+        .status-aprobado { background-color: #f0fdf4; color: #166534; border-color: #bbf7d0; }
+        .status-rechazado { background-color: #fef2f2; color: #991b1b; border-color: #fecaca; }
+        .summary-card { border-left: 4px solid #3b82f6; }
+        @media print { .no-print { display: none !important; } }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+
+    <div id="loading-overlay" class="fixed inset-0 bg-white z-[100] flex flex-col items-center justify-center transition-opacity duration-500">
+        <div class="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+        <p class="text-slate-500 font-bold text-xs uppercase tracking-widest">Conectando a la Nube...</p>
+    </div>
+
+    <!-- PANTALLA LOGIN -->
+    <div id="login-screen" class="login-bg min-h-screen flex items-center justify-center p-4">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
+            <div class="text-center mb-6">
+                <div class="bg-blue-600 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                    <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" stroke-width="2"></path></svg>
+                </div>
+                <h1 class="text-2xl font-bold text-slate-800">Cormumel Cloud</h1>
+                <p class="text-slate-500 text-sm">Sistema de Oficios Compartido</p>
+            </div>
+            
+            <div class="space-y-4">
+                <select id="login-type" class="w-full border rounded-xl px-4 py-3 outline-none" onchange="updateUserDropdown()">
+                    <option value="">Seleccione Perfil...</option>
+                    <option value="admin">Administrador / Depto</option>
+                    <option value="school">Establecimiento</option>
+                </select>
+                <div id="user-selection-container" class="hidden">
+                    <select id="login-user" class="w-full border rounded-xl px-4 py-3 outline-none"></select>
+                </div>
+                <input type="password" id="login-pass" class="w-full border rounded-xl px-4 py-3 outline-none" placeholder="Contraseña">
+                <button onclick="handleLogin()" class="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition-all">Entrar al Sistema</button>
+                <p id="login-error" class="text-red-500 text-xs text-center hidden font-bold">Credenciales inválidas</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- PANTALLA DASHBOARD -->
+    <div id="main-dashboard" class="hidden flex flex-col min-h-screen">
+        <nav class="bg-white border-b px-6 py-4 flex justify-between items-center sticky top-0 z-50 shadow-sm no-print">
+            <div class="flex items-center space-x-3">
+                <div class="bg-blue-600 px-3 py-1 rounded text-white font-black text-sm">OF</div>
+                <div>
+                    <h2 class="text-sm font-bold text-slate-800 leading-none" id="display-user-name">Usuario</h2>
+                    <p id="role-badge" class="text-[9px] text-blue-600 font-bold uppercase mt-1"></p>
+                </div>
+            </div>
+            <button onclick="location.reload()" class="text-slate-400 hover:text-red-600 text-[10px] font-bold uppercase tracking-widest">Cerrar Sesión</button>
+        </nav>
+
+        <main class="p-4 md:p-8 max-w-[1800px] mx-auto w-full">
+            <div id="financial-summary" class="mb-6 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3"></div>
+
+            <!-- FORMULARIO INGRESO -->
+            <div id="admin-panel" class="hidden mb-6 bg-white p-6 rounded-2xl shadow-sm border border-slate-200 no-print">
+                <h3 class="text-slate-800 font-bold mb-6 flex items-center gap-2">
+                    <span class="w-1.5 h-5 bg-blue-600 rounded-full"></span>
+                    Registrar Nuevo Oficio
+                </h3>
+                <form id="request-form" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <select id="form-school" class="border p-2.5 rounded-lg text-sm bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none" required></select>
+                    <input type="text" id="form-oficio" class="border p-2.5 rounded-lg text-sm bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none" required placeholder="N° Oficio">
+                    <input type="date" id="form-fecha-doc" class="border p-2.5 rounded-lg text-sm bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none" required>
+                    <input type="number" id="form-monto" class="border p-2.5 rounded-lg text-sm font-bold bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none" required placeholder="Monto $">
+                    <select id="form-finan" class="border p-2.5 rounded-lg text-sm bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none"></select>
+                    <input type="text" id="form-requerimiento" class="lg:col-span-2 border p-2.5 rounded-lg text-sm bg-slate-50 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Detalle del requerimiento...">
+                    <button type="submit" class="bg-blue-600 text-white font-bold py-2.5 rounded-lg hover:bg-blue-700 transition-colors shadow-md">Guardar en la Nube</button>
+                </form>
+            </div>
+
+            <!-- FILTROS -->
+            <div class="mb-6 bg-slate-100 p-4 rounded-xl border flex flex-wrap gap-4 items-end no-print">
+                <div class="flex-1 min-w-[200px]" id="filter-school-container">
+                    <label class="text-[10px] font-black text-slate-400 uppercase mb-1 block">Establecimiento</label>
+                    <select id="filter-school" onchange="renderTable()" class="w-full border rounded-lg p-2 text-xs bg-white">
+                        <option value="ALL">Todos los Establecimientos</option>
+                    </select>
+                </div>
+                <div class="flex-1 min-w-[150px]">
+                    <label class="text-[10px] font-black text-slate-400 uppercase mb-1 block">Estado del Oficio</label>
+                    <select id="filter-estado" onchange="renderTable()" class="w-full border rounded-lg p-2 text-xs bg-white">
+                        <option value="ALL">Todos los Estados</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- TABLA DE DATOS -->
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left">
+                        <thead>
+                            <tr class="text-[9px] font-black text-slate-400 uppercase bg-slate-50 border-b">
+                                <th class="px-6 py-4">Establecimiento</th>
+                                <th class="px-6 py-4">N° Oficio</th>
+                                <th class="px-6 py-4">Fecha</th>
+                                <th class="px-6 py-4">Vía</th>
+                                <th class="px-6 py-4">Detalle</th>
+                                <th class="px-6 py-4 text-right">Monto</th>
+                                <th class="px-6 py-4">Estado</th>
+                                <th class="px-6 py-4 no-print text-center">Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body" class="text-[11px] divide-y"></tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const CONFIG = {
+            admins: [{ name: "Claudio Jerez", pass: "12345" }, { name: "Sergio Pulgar", pass: "123455" }],
+            schools: [
+                { name: "ESCUELA SAN MIGUEL", pass: "Sanmi1" }, 
+                { name: "LICEO HERMANOS SOTOMAYOR", pass: "7129" },
+                { name: "POLITECNICO DE MELIPILLA", pass: "Poli2024" }
+            ],
+            vias: ["SEP", "PIE", "Mantenimiento", "Subv General", "FAEP"],
+            estados: ["Ingresado", "Aprobado", "En Revisión", "Rechazado"]
+        };
+
+        window.requests = [];
+        window.currentUser = null;
+
+        function populateSelects() {
+            const schSel = ['form-school', 'filter-school'];
+            schSel.forEach(id => {
+                const el = document.getElementById(id);
+                CONFIG.schools.forEach(s => el.innerHTML += `<option value="${s.name}">${s.name}</option>`);
+            });
+            document.getElementById('form-finan').innerHTML = CONFIG.vias.map(v => `<option value="${v}">${v}</option>`).join('');
+            document.getElementById('filter-estado').innerHTML += CONFIG.estados.map(e => `<option value="${e}">${e}</option>`).join('');
+        }
+
+        function updateUserDropdown() {
+            const type = document.getElementById('login-type').value;
+            const container = document.getElementById('user-selection-container');
+            const select = document.getElementById('login-user');
+            if (!type) return container.classList.add('hidden');
+            container.classList.remove('hidden');
+            const list = type === 'admin' ? CONFIG.admins : CONFIG.schools;
+            select.innerHTML = list.map(u => `<option value="${u.name}">${u.name}</option>`).join('');
+        }
+
+        function handleLogin() {
+            const type = document.getElementById('login-type').value;
+            const name = document.getElementById('login-user').value;
+            const pass = document.getElementById('login-pass').value;
+            const list = type === 'admin' ? CONFIG.admins : CONFIG.schools;
+            const user = list.find(u => u.name === name && u.pass === pass);
+            
+            if (user) {
+                window.currentUser = { ...user, role: type };
+                document.getElementById('login-screen').classList.add('hidden');
+                document.getElementById('main-dashboard').classList.remove('hidden');
+                document.getElementById('display-user-name').innerText = user.name;
+                document.getElementById('role-badge').innerText = type === 'admin' ? 'Gestión Central' : 'Usuario Escuela';
+                if (type === 'admin') document.getElementById('admin-panel').classList.remove('hidden');
+                renderTable();
+                updateFinancialSummary();
+            } else {
+                document.getElementById('login-error').classList.remove('hidden');
+            }
+        }
+
+        document.getElementById('request-form').onsubmit = async function(e) {
+            e.preventDefault();
+            const data = {
+                school: document.getElementById('form-school').value,
+                oficio: document.getElementById('form-oficio').value,
+                fechaDoc: document.getElementById('form-fecha-doc').value,
+                monto: parseFloat(document.getElementById('form-monto').value),
+                finan: document.getElementById('form-finan').value,
+                requerimiento: document.getElementById('form-requerimiento').value,
+                estado: "Ingresado",
+                createdAt: Date.now()
+            };
+
+            try {
+                // Guardado directo en la colección de nube configurada
+                await window.addDoc(window.collection(window.db, 'artifacts', window.appId, 'public', 'data', 'oficios'), data);
+                e.target.reset();
+            } catch (err) { alert("Error de conexión a la nube. Intente nuevamente."); }
+        };
+
+        async function updateStatus(id, newStatus) {
+            const ref = window.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'oficios', id);
+            await window.updateDoc(ref, { estado: newStatus });
+        }
+
+        async function deleteItem(id) {
+            if (confirm("¿Está seguro de eliminar este registro? Se borrará para todos los usuarios.")) {
+                await window.deleteDoc(window.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'oficios', id));
+            }
+        }
+
+        function renderTable() {
+            const body = document.getElementById('table-body');
+            const fSchool = document.getElementById('filter-school').value;
+            const fEstado = document.getElementById('filter-estado').value;
+
+            let filtered = [...window.requests];
+            
+            // Lógica de privacidad: Escuelas solo ven sus datos, Admins ven todo o filtrado
+            if (window.currentUser.role === 'school') {
+                filtered = filtered.filter(r => r.school === window.currentUser.name);
+            } else if (fSchool !== 'ALL') {
+                filtered = filtered.filter(r => r.school === fSchool);
+            }
+            
+            if (fEstado !== 'ALL') {
+                filtered = filtered.filter(r => r.estado === fEstado);
+            }
+
+            body.innerHTML = filtered.map(r => `
+                <tr class="hover:bg-slate-50 transition">
+                    <td class="px-6 py-4 font-bold text-slate-700">${r.school}</td>
+                    <td class="px-6 py-4 font-mono text-blue-600 font-bold">${r.oficio}</td>
+                    <td class="px-6 py-4 text-slate-500">${r.fechaDoc}</td>
+                    <td class="px-6 py-4"><span class="bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-tight">${r.finan}</span></td>
+                    <td class="px-6 py-4 text-slate-600 truncate max-w-xs">${r.requerimiento || '-'}</td>
+                    <td class="px-6 py-4 text-right font-black text-slate-800">$${(r.monto || 0).toLocaleString('es-CL')}</td>
+                    <td class="px-6 py-4">
+                        ${window.currentUser.role === 'admin' ? `
+                            <select onchange="updateStatus('${r.id_db}', this.value)" class="border rounded p-1 font-bold text-[10px] cursor-pointer focus:ring-1 focus:ring-blue-400">
+                                ${CONFIG.estados.map(e => `<option value="${e}" ${r.estado === e ? 'selected' : ''}>${e}</option>`).join('')}
+                            </select>
+                        ` : `<span class="px-2 py-1 rounded border font-bold text-[10px] status-${r.estado?.toLowerCase() || 'ingresado'}">${r.estado}</span>`}
+                    </td>
+                    <td class="px-6 py-4 text-center no-print">
+                        ${window.currentUser.role === 'admin' ? `
+                            <button onclick="deleteItem('${r.id_db}')" class="text-red-400 hover:text-red-600 font-bold transition-colors">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                            </button>
+                        ` : '-'}
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function updateFinancialSummary() {
+            const container = document.getElementById('financial-summary');
+            // Si es admin, resumimos según el filtro de escuela seleccionado
+            const school = window.currentUser.role === 'admin' ? document.getElementById('filter-school').value : window.currentUser.name;
+            
+            let currentData = window.requests;
+            if (school !== 'ALL') {
+                currentData = currentData.filter(r => r.school === school);
+            }
+            
+            container.innerHTML = CONFIG.vias.map(via => {
+                const total = currentData.filter(r => r.finan === via).reduce((s, r) => s + (r.monto || 0), 0);
+                return `
+                    <div class="bg-white p-3 rounded-xl border summary-card">
+                        <p class="text-[8px] font-black text-slate-400 uppercase tracking-tighter">${via}</p>
+                        <p class="text-xs font-bold text-slate-800">$${total.toLocaleString('es-CL')}</p>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        populateSelects();
+    </script>
+</body>
+</html>
