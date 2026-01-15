@@ -3,19 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sistema de Registro de Oficios - Melipilla Cloud</title>
+    <title>Cormumel Cloud - Sistema de Oficios</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
     
-    <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // ================================================================
-        // CONFIGURACIÓN DE FIREBASE (LISTO PARA PRODUCCIÓN)
-        // ================================================================
+        // Configuración de Firebase verificada
         const firebaseConfig = {
             apiKey: "AIzaSyAoA0L_U8vPtjPoT0LFcUul-ru9zfBUbcE",
             authDomain: "oficios-cormumel.firebaseapp.com",
@@ -24,259 +23,105 @@
             messagingSenderId: "627877537549",
             appId: "1:627877537549:web:c46ab328590220164f3244"
         };
-        // ================================================================
 
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
         
-        // ID único para la colección en la nube
-        const appId = 'oficios-melipilla-cloud';
+        // Usamos una ruta de colección fija y segura para evitar conflictos de permisos
+        const appId = "oficios-cormumel-prod"; 
 
-        // Referencias globales para funciones de UI
-        window.db = db;
-        window.appId = appId;
-        window.auth = auth;
-        window.deleteDoc = deleteDoc;
-        window.doc = doc;
-        window.updateDoc = updateDoc;
-        window.addDoc = addDoc;
-        window.collection = collection;
+        let requests = [];
+        let currentUser = null;
 
-        let snapshotUnsubscribe = null;
+        // Exponer funciones al objeto window para interactividad HTML
+        window.handleLogin = handleLogin;
+        window.changeStatus = changeStatus;
+        window.deleteOficio = deleteOficio;
+        window.renderTable = renderTable;
+        window.updateLoginDropdown = updateLoginDropdown;
+        window.togglePMEFields = togglePMEFields;
+        window.updateSubdimensions = updateSubdimensions;
+        window.updateSummaryOnSchoolChange = updateSummaryOnSchoolChange;
+        window.exportToExcel = exportToExcel;
+        window.exportToPDF = exportToPDF;
 
-        // AUTHENTICATION: Conexión inicial anónima
         async function initAuth() {
             try {
-                await signInAnonymously(auth);
-            } catch (error) {
-                console.error("Auth error:", error);
-                const loaderText = document.getElementById('loading-text');
-                if (loaderText) {
-                    loaderText.innerText = "Error de conexión: Revisa el acceso anónimo en Firebase.";
-                    loaderText.classList.add('text-red-500');
+                // Prioridad 1: Intentar con Token si existe y es válido
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    try {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                        console.log("Autenticado con token personalizado");
+                    } catch (tokenError) {
+                        console.warn("Token fallido, intentando anónimo...", tokenError);
+                        await signInAnonymously(auth);
+                    }
+                } else {
+                    // Prioridad 2: Inicio anónimo (Estándar para apps de visualización rápida)
+                    await signInAnonymously(auth);
+                    console.log("Autenticado de forma anónima");
                 }
+            } catch (e) {
+                console.error("Error crítico de autenticación:", e);
+                document.getElementById('loading-overlay').innerHTML = `
+                    <div class="text-center p-6 bg-white rounded-xl shadow-xl">
+                        <p class="text-red-600 font-bold text-lg mb-2">Error de Conexión</p>
+                        <p class="text-xs text-slate-500 mb-4">No se pudo establecer comunicación con el servidor de Melipilla.</p>
+                        <div class="text-[10px] bg-slate-100 p-2 rounded mb-4 font-mono text-left">${e.message}</div>
+                        <button onclick="location.reload()" class="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold">Reintentar Conexión</button>
+                    </div>
+                `;
             }
         }
 
         onAuthStateChanged(auth, (user) => {
             if (user) {
-                setupSnapshotListener();
-            } else if (snapshotUnsubscribe) {
-                snapshotUnsubscribe();
+                console.log("Sesión activa:", user.uid);
+                setupListener();
             }
         });
 
-        function setupSnapshotListener() {
-            if (snapshotUnsubscribe) snapshotUnsubscribe();
-            
-            // Ruta de datos en Firestore
+        function setupListener() {
+            // Regla: Colección bajo /artifacts/{appId}/public/data/oficios
             const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'oficios'));
             
-            snapshotUnsubscribe = onSnapshot(q, (snapshot) => {
+            onSnapshot(q, (snapshot) => {
                 const data = [];
-                snapshot.forEach((doc) => {
-                    data.push({ id_db: doc.id, ...doc.data() });
-                });
+                snapshot.forEach(doc => data.push({ id_db: doc.id, ...doc.data() }));
+                requests = data.sort((a,b) => (b.createdAt || 0) - (a.createdAt || 0));
                 
-                // Ordenar por fecha de creación (localmente)
-                window.requests = data.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-                
-                if (window.currentUser) {
-                    renderTable();
-                    updateFinancialSummary();
+                if (currentUser) { 
+                    renderTable(); 
+                    updateFinancialSummary(); 
                 }
-                
-                // Ocultar pantalla de carga
-                const loader = document.getElementById('loading-overlay');
-                if (loader) {
-                    loader.classList.add('opacity-0');
-                    setTimeout(() => loader.style.display = 'none', 500);
-                }
+                document.getElementById('loading-overlay').style.display = 'none';
             }, (error) => {
-                console.error("Firestore error:", error);
-                const loaderText = document.getElementById('loading-text');
-                if (loaderText) {
-                    loaderText.innerText = "Error de permisos: Revisa las Reglas de Firestore.";
-                    loaderText.classList.add('text-red-500');
+                console.error("Error de lectura en Firestore:", error);
+                // Si hay error de permisos, mostrar mensaje útil
+                if (error.code === 'permission-denied') {
+                    console.error("Asegúrate de que las reglas de Firestore permitan lectura en: artifacts/" + appId + "/public/data/oficios");
                 }
             });
-        }
-
-        window.onload = initAuth;
-    </script>
-
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
-        body { font-family: 'Inter', sans-serif; }
-        .login-bg { background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%); }
-        .status-ingresado { background-color: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
-        .status-aprobado { background-color: #f0fdf4; color: #166534; border-color: #bbf7d0; }
-        .status-rechazado { background-color: #fef2f2; color: #991b1b; border-color: #fecaca; }
-        .summary-card { border-left: 4px solid #3b82f6; }
-        @media print { .no-print { display: none !important; } }
-    </style>
-</head>
-<body class="bg-slate-50 min-h-screen">
-
-    <!-- Cargando -->
-    <div id="loading-overlay" class="fixed inset-0 bg-white z-[100] flex flex-col items-center justify-center transition-opacity duration-500">
-        <div class="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
-        <p id="loading-text" class="text-slate-500 font-bold text-xs uppercase tracking-widest text-center px-4">Conectando a Cormumel Cloud...</p>
-    </div>
-
-    <!-- Pantalla Login -->
-    <div id="login-screen" class="login-bg min-h-screen flex items-center justify-center p-4">
-        <div class="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
-            <div class="text-center mb-6">
-                <div class="bg-blue-600 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                    <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" stroke-width="2"></path></svg>
-                </div>
-                <h1 class="text-2xl font-bold text-slate-800">Cormumel Cloud</h1>
-                <p class="text-slate-500 text-sm">Registro de Oficios Melipilla</p>
-            </div>
-            
-            <div class="space-y-4">
-                <select id="login-type" class="w-full border rounded-xl px-4 py-3 outline-none" onchange="updateUserDropdown()">
-                    <option value="">Seleccione Perfil...</option>
-                    <option value="admin">Administrador / Depto</option>
-                    <option value="school">Establecimiento</option>
-                </select>
-                <div id="user-selection-container" class="hidden">
-                    <select id="login-user" class="w-full border rounded-xl px-4 py-3 outline-none"></select>
-                </div>
-                <input type="password" id="login-pass" class="w-full border rounded-xl px-4 py-3 outline-none" placeholder="Contraseña">
-                <button onclick="handleLogin()" class="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition-all">Ingresar</button>
-                <p id="login-error" class="text-red-500 text-xs text-center hidden font-bold">Error: Credenciales inválidas</p>
-            </div>
-        </div>
-    </div>
-
-    <!-- Dashboard -->
-    <div id="main-dashboard" class="hidden flex flex-col min-h-screen">
-        <nav class="bg-white border-b px-6 py-4 flex justify-between items-center sticky top-0 z-50 shadow-sm no-print">
-            <div class="flex items-center space-x-3">
-                <div class="bg-blue-600 px-3 py-1 rounded text-white font-black text-sm">OF</div>
-                <div>
-                    <h2 class="text-sm font-bold text-slate-800 leading-none" id="display-user-name">Usuario</h2>
-                    <p id="role-badge" class="text-[9px] text-blue-600 font-bold uppercase mt-1"></p>
-                </div>
-            </div>
-            <button onclick="location.reload()" class="text-slate-400 hover:text-red-600 text-[10px] font-bold uppercase tracking-widest">Salir</button>
-        </nav>
-
-        <main class="p-4 md:p-8 max-w-[1800px] mx-auto w-full">
-            <!-- Resumen Financiero -->
-            <div id="financial-summary" class="mb-6 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3"></div>
-
-            <!-- Panel de Registro (Admin) -->
-            <div id="admin-panel" class="hidden mb-6 bg-white p-6 rounded-2xl shadow-sm border border-slate-200 no-print">
-                <h3 class="text-slate-800 font-bold mb-4 flex items-center gap-2">
-                    <span class="w-1.5 h-5 bg-blue-600 rounded-full"></span>
-                    Nuevo Registro de Oficio
-                </h3>
-                <form id="request-form" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <select id="form-school" class="border p-2.5 rounded-lg text-sm bg-slate-50 outline-none" required></select>
-                    <input type="text" id="form-oficio" class="border p-2.5 rounded-lg text-sm bg-slate-50 outline-none" required placeholder="N° Oficio">
-                    <input type="date" id="form-fecha-doc" class="border p-2.5 rounded-lg text-sm bg-slate-50 outline-none" required>
-                    <input type="number" id="form-monto" class="border p-2.5 rounded-lg text-sm font-bold bg-slate-50 outline-none" required placeholder="Monto $">
-                    <select id="form-finan" class="border p-2.5 rounded-lg text-sm bg-slate-50 outline-none"></select>
-                    <input type="text" id="form-requerimiento" class="lg:col-span-2 border p-2.5 rounded-lg text-sm bg-slate-50 outline-none" placeholder="Detalle del requerimiento...">
-                    <button type="submit" class="bg-blue-600 text-white font-bold py-2.5 rounded-lg hover:bg-blue-700 transition-colors shadow-md">Guardar en Nube</button>
-                </form>
-            </div>
-
-            <!-- Filtros -->
-            <div class="mb-6 bg-slate-100 p-4 rounded-xl border flex flex-wrap gap-4 items-end no-print">
-                <div class="flex-1 min-w-[200px]" id="filter-school-container">
-                    <label class="text-[10px] font-black text-slate-400 uppercase mb-1 block">Establecimiento</label>
-                    <select id="filter-school" onchange="renderTable()" class="w-full border rounded-lg p-2 text-xs bg-white">
-                        <option value="ALL">Todos</option>
-                    </select>
-                </div>
-                <div class="flex-1 min-w-[150px]">
-                    <label class="text-[10px] font-black text-slate-400 uppercase mb-1 block">Estado</label>
-                    <select id="filter-estado" onchange="renderTable()" class="w-full border rounded-lg p-2 text-xs bg-white">
-                        <option value="ALL">Todos los Estados</option>
-                    </select>
-                </div>
-            </div>
-
-            <!-- Listado -->
-            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-                <div class="overflow-x-auto">
-                    <table class="w-full text-left">
-                        <thead>
-                            <tr class="text-[9px] font-black text-slate-400 uppercase bg-slate-50 border-b">
-                                <th class="px-6 py-4">Establecimiento</th>
-                                <th class="px-6 py-4">N° Oficio</th>
-                                <th class="px-6 py-4">Fecha</th>
-                                <th class="px-6 py-4">Vía</th>
-                                <th class="px-6 py-4">Detalle</th>
-                                <th class="px-6 py-4 text-right">Monto</th>
-                                <th class="px-6 py-4">Estado</th>
-                                <th class="px-6 py-4 no-print text-center">Acciones</th>
-                            </tr>
-                        </thead>
-                        <tbody id="table-body" class="text-[11px] divide-y"></tbody>
-                    </table>
-                </div>
-            </div>
-        </main>
-    </div>
-
-    <script>
-        const CONFIG = {
-            admins: [{ name: "Claudio Jerez", pass: "12345" }, { name: "Sergio Pulgar", pass: "123455" }],
-            schools: [
-                { name: "ESCUELA SAN MIGUEL", pass: "Sanmi1" }, 
-                { name: "LICEO HERMANOS SOTOMAYOR", pass: "7129" },
-                { name: "POLITECNICO DE MELIPILLA", pass: "Poli2024" }
-            ],
-            vias: ["SEP", "PIE", "Mantenimiento", "Subv General", "FAEP"],
-            estados: ["Ingresado", "Aprobado", "En Revisión", "Rechazado"]
-        };
-
-        window.requests = [];
-        window.currentUser = null;
-
-        function populateSelects() {
-            const schSel = ['form-school', 'filter-school'];
-            schSel.forEach(id => {
-                const el = document.getElementById(id);
-                if (el) {
-                    el.innerHTML = id === 'filter-school' ? '<option value="ALL">Todos</option>' : '';
-                    CONFIG.schools.forEach(s => el.innerHTML += `<option value="${s.name}">${s.name}</option>`);
-                }
-            });
-            document.getElementById('form-finan').innerHTML = CONFIG.vias.map(v => `<option value="${v}">${v}</option>`).join('');
-            document.getElementById('filter-estado').innerHTML = '<option value="ALL">Todos los Estados</option>' + CONFIG.estados.map(e => `<option value="${e}">${e}</option>`).join('');
-        }
-
-        function updateUserDropdown() {
-            const type = document.getElementById('login-type').value;
-            const container = document.getElementById('user-selection-container');
-            const select = document.getElementById('login-user');
-            if (!type) return container.classList.add('hidden');
-            container.classList.remove('hidden');
-            const list = type === 'admin' ? CONFIG.admins : CONFIG.schools;
-            select.innerHTML = list.map(u => `<option value="${u.name}">${u.name}</option>`).join('');
         }
 
         function handleLogin() {
             const type = document.getElementById('login-type').value;
-            const name = document.getElementById('login-user').value;
+            const userVal = document.getElementById('login-user').value;
             const pass = document.getElementById('login-pass').value;
             const list = type === 'admin' ? CONFIG.admins : CONFIG.schools;
-            const user = list.find(u => u.name === name && u.pass === pass);
             
-            if (user) {
-                window.currentUser = { ...user, role: type };
+            const match = list.find(u => (u.name === userVal || u.realName === userVal) && u.pass === pass);
+            
+            if (match) {
+                currentUser = { ...match, role: type };
                 document.getElementById('login-screen').classList.add('hidden');
                 document.getElementById('main-dashboard').classList.remove('hidden');
-                document.getElementById('display-user-name').innerText = user.name;
-                document.getElementById('role-badge').innerText = type === 'admin' ? 'Gestión Central' : 'Usuario Escuela';
+                document.getElementById('display-user-name').innerText = match.name;
+                document.getElementById('role-badge').innerText = type === 'admin' ? 'Gestión Central' : `RBD ${match.rbd}`;
                 if (type === 'admin') document.getElementById('admin-panel').classList.remove('hidden');
+                
+                initFormSelects();
                 renderTable();
                 updateFinancialSummary();
             } else {
@@ -284,101 +129,466 @@
             }
         }
 
-        document.getElementById('request-form').onsubmit = async function(e) {
-            e.preventDefault();
-            const data = {
-                school: document.getElementById('form-school').value,
-                oficio: document.getElementById('form-oficio').value,
-                fechaDoc: document.getElementById('form-fecha-doc').value,
-                monto: parseFloat(document.getElementById('form-monto').value),
-                finan: document.getElementById('form-finan').value,
-                requerimiento: document.getElementById('form-requerimiento').value,
-                estado: "Ingresado",
-                createdAt: Date.now()
-            };
-
+        async function changeStatus(id, newStatus) {
+            if (!auth.currentUser) return;
             try {
-                await window.addDoc(window.collection(window.db, 'artifacts', window.appId, 'public', 'data', 'oficios'), data);
-                e.target.reset();
-            } catch (err) { 
-                alert("Error: Revisa que Firestore esté activo en modo de prueba."); 
-            }
-        };
-
-        async function updateStatus(id, newStatus) {
-            try {
-                const ref = window.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'oficios', id);
-                await window.updateDoc(ref, { estado: newStatus });
+                const ref = doc(db, 'artifacts', appId, 'public', 'data', 'oficios', id);
+                await updateDoc(ref, { 
+                    estado: newStatus,
+                    modBy: currentUser.name,
+                    modAt: new Date().toLocaleString()
+                });
             } catch (e) {
-                alert("Error al actualizar estado.");
+                console.error("Error al actualizar estado:", e);
             }
         }
 
-        async function deleteItem(id) {
-            if (confirm("¿Eliminar registro de la nube?")) {
+        async function deleteOficio(id) {
+            if (!auth.currentUser) return;
+            if(confirm("¿Seguro que desea eliminar este registro?")) {
                 try {
-                    await window.deleteDoc(window.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'oficios', id));
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'oficios', id));
                 } catch (e) {
-                    alert("Error al eliminar.");
+                    console.error("Error al eliminar:", e);
                 }
             }
         }
 
+        document.addEventListener('DOMContentLoaded', () => {
+            const form = document.getElementById('request-form');
+            if(form) {
+                form.onsubmit = async (e) => {
+                    e.preventDefault();
+                    if (!auth.currentUser) return;
+
+                    const via = document.getElementById('form-finan').value;
+                    const data = {
+                        school: document.getElementById('form-school').value,
+                        oficio: document.getElementById('form-oficio').value,
+                        monto: parseFloat(document.getElementById('form-monto').value) || 0,
+                        fechaDoc: document.getElementById('form-fecha-doc').value,
+                        fechaEntrega: document.getElementById('form-fecha-entrega').value,
+                        finan: via,
+                        pac: document.getElementById('form-pac').value || 'N/A',
+                        dimension: via === 'SEP' ? document.getElementById('form-dimension').value : 'N/A',
+                        subdimension: via === 'SEP' ? document.getElementById('form-subdimension').value : 'N/A',
+                        requerimiento: document.getElementById('form-requerimiento').value,
+                        tipoGasto: document.getElementById('form-tipo-gasto').value,
+                        estado: 'Ingresado',
+                        modBy: currentUser.name,
+                        modAt: new Date().toLocaleString(),
+                        createdAt: Date.now()
+                    };
+
+                    try {
+                        await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'oficios'), data);
+                        e.target.reset();
+                        document.getElementById('form-requerimiento').style.height = '80px';
+                        togglePMEFields();
+                        updateFinancialSummary();
+                    } catch (err) {
+                        console.error("Error al guardar oficio:", err);
+                    }
+                };
+            }
+        });
+
         function renderTable() {
             const body = document.getElementById('table-body');
             const fSchool = document.getElementById('filter-school').value;
-            const fEstado = document.getElementById('filter-estado').value;
+            const fEst = document.getElementById('filter-estado').value;
+            const fFin = document.getElementById('filter-finan').value;
 
-            let filtered = [...window.requests];
-            if (window.currentUser.role === 'school') {
-                filtered = filtered.filter(r => r.school === window.currentUser.name);
+            let filtered = requests || [];
+            if (currentUser.role === 'school') {
+                filtered = filtered.filter(r => r.school === currentUser.name);
             } else if (fSchool !== 'ALL') {
                 filtered = filtered.filter(r => r.school === fSchool);
             }
-            if (fEstado !== 'ALL') filtered = filtered.filter(r => r.estado === fEstado);
+            if (fEst !== 'ALL') filtered = filtered.filter(r => r.estado === fEst);
+            if (fFin !== 'ALL') filtered = filtered.filter(r => r.finan === fFin);
 
-            body.innerHTML = filtered.map(r => `
-                <tr class="hover:bg-slate-50 transition">
-                    <td class="px-6 py-4 font-bold text-slate-700">${r.school}</td>
-                    <td class="px-6 py-4 font-mono text-blue-600 font-bold">${r.oficio}</td>
-                    <td class="px-6 py-4 text-slate-500">${r.fechaDoc}</td>
-                    <td class="px-6 py-4"><span class="bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-[9px] font-bold uppercase">${r.finan}</span></td>
-                    <td class="px-6 py-4 text-slate-600 truncate max-w-xs">${r.requerimiento || '-'}</td>
-                    <td class="px-6 py-4 text-right font-black text-slate-800">$${(r.monto || 0).toLocaleString('es-CL')}</td>
-                    <td class="px-6 py-4">
-                        ${window.currentUser.role === 'admin' ? `
-                            <select onchange="updateStatus('${r.id_db}', this.value)" class="border rounded p-1 font-bold text-[10px] cursor-pointer outline-none">
-                                ${CONFIG.estados.map(e => `<option value="${e}" ${r.estado === e ? 'selected' : ''}>${e}</option>`).join('')}
-                            </select>
-                        ` : `<span class="px-2 py-1 rounded border font-bold text-[10px] status-${r.estado?.toLowerCase() || 'ingresado'}">${r.estado}</span>`}
-                    </td>
-                    <td class="px-6 py-4 text-center no-print">
-                        ${window.currentUser.role === 'admin' ? `
-                            <button onclick="deleteItem('${r.id_db}')" class="text-red-400 hover:text-red-600">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                            </button>
-                        ` : '-'}
-                    </td>
-                </tr>
-            `).join('');
+            let totalSum = 0;
+            body.innerHTML = filtered.map(r => {
+                totalSum += r.monto || 0;
+                const schoolObj = CONFIG.schools.find(s => s.name === r.school);
+                const rbd = schoolObj ? schoolObj.rbd : '???';
+                const statusClass = `st-${r.estado.toLowerCase().replace(/ó/g,'o').replace(/ /g,'')}`;
+                
+                return `
+                    <tr class="hover:bg-slate-50 transition border-b">
+                        <td class="px-4 py-3 font-bold text-slate-700">${rbd}<br><span class="text-[7px] text-slate-400 font-normal uppercase">${r.school}</span></td>
+                        <td class="px-4 py-3 font-mono font-bold text-blue-700">${r.oficio}</td>
+                        <td class="px-4 py-3">${r.fechaDoc}</td>
+                        <td class="px-4 py-3">${r.fechaEntrega}</td>
+                        <td class="px-4 py-3 font-black text-blue-800">${r.finan}</td>
+                        <td class="px-4 py-3 font-black text-right text-slate-800">$${(r.monto || 0).toLocaleString('es-CL')}</td>
+                        <td class="px-4 py-3 text-[8px] text-slate-500 leading-tight">
+                            ${r.finan === 'SEP' ? `<b>${r.dimension}</b><br>${r.subdimension}` : '-'}
+                        </td>
+                        <td class="px-4 py-3 italic whitespace-pre-wrap leading-tight max-w-xs">${r.requerimiento}</td>
+                        <td class="px-4 py-3 text-slate-600 leading-tight">${r.tipoGasto}</td>
+                        <td class="px-4 py-3">
+                            ${currentUser.role === 'admin' ? `
+                                <select onchange="changeStatus('${r.id_db}', this.value)" class="status-badge ${statusClass} border rounded font-bold cursor-pointer p-1">
+                                    ${CONFIG.estados.map(e => `<option value="${e}" ${r.estado === e ? 'selected' : ''}>${e}</option>`).join('')}
+                                </select>
+                            ` : `<span class="status-badge ${statusClass}">${r.estado}</span>`}
+                        </td>
+                        <td class="px-4 py-3 text-center no-print">
+                            <div class="text-[7px] text-slate-400 mb-1 leading-none">Por: ${r.modBy || 'Sist'}<br>${r.modAt || '-'}</div>
+                            ${currentUser.role === 'admin' ? `
+                                <button onclick="deleteOficio('${r.id_db}')" class="text-red-400 hover:text-red-700 font-bold uppercase text-[8px]">Borrar</button>
+                            ` : ''}
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+            document.getElementById('table-total-sum').innerText = `$${totalSum.toLocaleString('es-CL')}`;
         }
 
         function updateFinancialSummary() {
             const container = document.getElementById('financial-summary');
-            const school = window.currentUser.role === 'admin' ? document.getElementById('filter-school').value : window.currentUser.name;
-            let currentData = window.requests;
-            if (school !== 'ALL') currentData = currentData.filter(r => r.school === school);
-            container.innerHTML = CONFIG.vias.map(via => {
-                const total = currentData.filter(r => r.finan === via).reduce((s, r) => s + (r.monto || 0), 0);
+            if (!container) return;
+            const currentSchool = currentUser.role === 'admin' ? document.getElementById('form-school').value : currentUser.name;
+            const schoolData = requests.filter(r => r.school === currentSchool);
+            
+            container.innerHTML = CONFIG.vias.map(v => {
+                const total = schoolData.filter(r => r.finan === v).reduce((acc, r) => acc + (r.monto || 0), 0);
                 return `
-                    <div class="bg-white p-3 rounded-xl border summary-card">
-                        <p class="text-[8px] font-black text-slate-400 uppercase tracking-tighter">${via}</p>
-                        <p class="text-xs font-bold text-slate-800">$${total.toLocaleString('es-CL')}</p>
-                    </div>`;
+                    <div class="summary-card">
+                        <p class="text-[8px] font-black text-slate-400 uppercase tracking-tighter">${v}</p>
+                        <p class="text-xs font-black text-blue-800">$${total.toLocaleString('es-CL')}</p>
+                    </div>
+                `;
             }).join('');
         }
 
-        populateSelects();
+        function initFormSelects() {
+            const fSchool = document.getElementById('form-school');
+            const filSchool = document.getElementById('filter-school');
+            fSchool.innerHTML = CONFIG.schools.map(s => `<option value="${s.name}">${s.rbd} - ${s.name}</option>`).join('');
+            filSchool.innerHTML = '<option value="ALL">Todos los Establecimientos</option>' + CONFIG.schools.map(s => `<option value="${s.name}">${s.rbd} - ${s.name}</option>`).join('');
+            
+            document.getElementById('form-finan').innerHTML = CONFIG.vias.map(v => `<option value="${v}">${v}</option>`).join('');
+            document.getElementById('filter-finan').innerHTML = '<option value="ALL">Financiamiento: Todos</option>' + CONFIG.vias.map(v => `<option value="${v}">${v}</option>`).join('');
+            document.getElementById('filter-estado').innerHTML = '<option value="ALL">Estado: Todos</option>' + CONFIG.estados.map(e => `<option value="${e}">${e}</option>`).join('');
+            document.getElementById('form-tipo-gasto').innerHTML = CONFIG.gastos.map(g => `<option value="${g}">${g}</option>`).join('');
+            
+            document.getElementById('form-dimension').innerHTML = Object.keys(CONFIG.pme).map(d => `<option value="${d}">${d}</option>`).join('');
+            updateSubdimensions();
+        }
+
+        function updateSubdimensions() {
+            const dim = document.getElementById('form-dimension').value;
+            const subs = CONFIG.pme[dim] || [];
+            document.getElementById('form-subdimension').innerHTML = subs.map(s => `<option value="${s}">${s}</option>`).join('');
+        }
+
+        function togglePMEFields() {
+            const via = document.getElementById('form-finan').value;
+            const pmeDiv = document.getElementById('pme-fields');
+            via === 'SEP' ? pmeDiv.classList.remove('hidden') : pmeDiv.classList.add('hidden');
+        }
+
+        function updateSummaryOnSchoolChange() {
+            if(currentUser?.role === 'admin') updateFinancialSummary();
+        }
+
+        function updateLoginDropdown() {
+            const type = document.getElementById('login-type').value;
+            const cont = document.getElementById('login-user-container');
+            const sel = document.getElementById('login-user');
+            if (!type) return cont.classList.add('hidden');
+            cont.classList.remove('hidden');
+            const data = type === 'admin' ? CONFIG.admins : CONFIG.schools.map(s => ({ name: `${s.rbd} - ${s.name}`, realName: s.name }));
+            sel.innerHTML = data.map(u => `<option value="${u.realName || u.name}">${u.name}</option>`).join('');
+        }
+
+        function exportToExcel() {
+            const wb = XLSX.utils.book_new();
+            const wsData = [['RBD', 'Escuela', 'N° Oficio', 'Monto', 'Financiamiento', 'Gasto', 'Requerimiento', 'Estado']];
+            requests.forEach(r => {
+                const rbd = CONFIG.schools.find(s => s.name === r.school)?.rbd || '';
+                wsData.push([rbd, r.school, r.oficio, r.monto, r.finan, r.tipoGasto, r.requerimiento, r.estado]);
+            });
+            const ws = XLSX.utils.aoa_to_sheet(wsData);
+            XLSX.utils.book_append_sheet(wb, ws, "Oficios");
+            XLSX.writeFile(wb, `Cormumel_Reporte_${Date.now()}.xlsx`);
+        }
+
+        function exportToPDF() {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF('l');
+            doc.setFontSize(14);
+            doc.text("Reporte Consolidado de Oficios - Cormumel Melipilla", 15, 15);
+            doc.setFontSize(8);
+            doc.text("Copyright © Claudio Jerez Santis", 15, 20);
+            
+            doc.autoTable({
+                head: [['Escuela', 'Oficio', 'Fecha', 'Vía', 'Monto', 'Estado']],
+                body: (requests || []).map(r => [r.school, r.oficio, r.fechaDoc, r.finan, `$${(r.monto||0).toLocaleString('es-CL')}`, r.estado]),
+                startY: 25,
+                theme: 'striped',
+                headStyles: { fillColor: [30, 58, 138] }
+            });
+            doc.save(`Reporte_Cormumel_${Date.now()}.pdf`);
+        }
+
+        initAuth();
     </script>
+
+    <script>
+        const CONFIG = {
+            admins: [
+                { name: "Claudio Jerez", pass: "Claudio2026" },
+                { name: "Sergio Pulgar", pass: "Sergio2026" },
+                { name: "Rodolfo Rojas", pass: "Rodolfo2026" },
+                { name: "Marco Toro", pass: "Marco2026" },
+                { name: "Claudia Armijo", pass: "Claudia2026" },
+                { name: "Juany Soto", pass: "Juany2026" },
+                { name: "Ana Maria Muñoz", pass: "AnaMaria2026" },
+                { name: "Maria Soledad Munizaga", pass: "Soledad2026" },
+                { name: "Alejandra Armijo", pass: "Alejandra2026" },
+                { name: "Acsa Martinez", pass: "Acsa2026" },
+                { name: "Contabilidad", pass: "Contabilidad2026" },
+                { name: "Presupuesto", pass: "Presupuesto2026" },
+                { name: "Unidad de Compras", pass: "Compras2026" },
+                { name: "Rodrigo Rivera", pass: "Rodrigo2025" },
+                { name: "Elizabeth Olea", pass: "Elizabeth2025" },
+                { name: "Patricio Manriquez", pass: "Patricio2025" },
+                { name: "Karen Ortiz", pass: "Karen2025" }
+            ],
+            schools: [
+                { rbd: "10778", name: "ESCUELA SAN MIGUEL", pass: "Sanmi10778" },
+                { rbd: "10780", name: "LICEO BICENTENADOS SOTOMAYOR BAEZA", pass: "71293130" },
+                { rbd: "10781", name: "POLITECNICO", pass: "MACARENA123" },
+                { rbd: "10782", name: "ESCUELA IGNACIO SERRANO MONTANER", pass: "arbra121" },
+                { rbd: "10783", name: "LICEO GABRIELA MISTRAL DE MELIPILLA", pass: "Gab2022h" },
+                { rbd: "10784", name: "COLEGIO HUILCO ALTO", pass: "71293114" },
+                { rbd: "10785", name: "COLEGIO MONS. JAIME LARRAIN BUNSTER", pass: "larrain2024" },
+                { rbd: "10786", name: "ESCUELA SAN JOSE DE LA VILLA", pass: "10786454" },
+                { rbd: "10789", name: "ESCUELA GRAL. CAROL URZUA", pass: "78910carol" },
+                { rbd: "10790", name: "ESCUELA REPUBLICA DEL BRASIL", pass: "RBRASIL24" },
+                { rbd: "10791", name: "COLEGIO POMAIRE", pass: "eriamop2" },
+                { rbd: "10792", name: "LICEO POLIV. EL BOLLENAR", pass: "Director2022*" },
+                { rbd: "10794", name: "ESCUELA SANTA ROSA ESMERALDA", pass: "Esanta10" },
+                { rbd: "10795", name: "ESCUELA CLAUDIO ARRAU", pass: "Eca107956" },
+                { rbd: "10796", name: "ESCUELA PATRICIO LARRAIN GANDARILLAS", pass: "santaelisa10" },
+                { rbd: "10797", name: "ESCUELA PEDRO MARIN ALEMANY", pass: "pm71293113" },
+                { rbd: "10798", name: "ESCUELA BASICA CARMEN BAJO", pass: "Cbajo26" },
+                { rbd: "10799", name: "ESCUELA RAMON NOGUERA PRIETO", pass: "Clou25" },
+                { rbd: "10805", name: "ESCUELA PUANGUE", pass: "71293199" },
+                { rbd: "10810", name: "ESCUELA LIDIA MATTE HURTADO", pass: "71293118" },
+                { rbd: "10816", name: "ESCUELA JOSE CAMARENA ESCRIVA", pass: "Wilson12" },
+                { rbd: "10818", name: "ESCUELA HUECHUN", pass: "colegio1965" },
+                { rbd: "10821", name: "ESCUELA RAQUEL FERNANDEZ DE MORANDE", pass: "Rf71293187" },
+                { rbd: "10825", name: "ESCUELA PADRE ALBERTO HURTADO", pass: "71293186" },
+                { rbd: "10827", name: "ESCUELA BASICA EL PABELLON", pass: "Larrain10827" },
+                { rbd: "25089", name: "LICEO LOS JAZMINES", pass: "Jazm1nL1c30" }
+            ],
+            vias: ["SEP", "PIE", "Mantenimiento", "Subv General", "FAEP", "Proretención"],
+            estados: ["Ingresado", "En Revisión", "Aprobado", "Rechazado", "Pagado"],
+            pme: {
+                "Gestión Pedagógica": ["Gestión curricular", "Enseñanza y aprendizaje en el aula", "Apoyo al desarrollo de los estudiantes"],
+                "Liderazgo": ["Liderazgo del sostenedor", "Liderazgo del director", "Planificación y gestión de resultados"],
+                "Convivencia Escolar": ["Formación", "Convivencia", "Participación y vida democrática"],
+                "Gestión de Recursos": ["Gestión de RR.HH.", "Gestión financiera", "Gestión de recursos educativos"]
+            },
+            gastos: [
+                "410 101 SUELDO BASE", "410 119 COLACIÓN Y MOVILIZACIÓN", "410 124 BONO INCENTIVO AL DESEMPEÑO LEY N° 20.248",
+                "410 302 VIÁTICOS", "410 304 OTROS GASTOS EN PERSONAL", "410 501 ASISTENCIA TÉCNICO PEDAGÓGICA EDUCATIVA (REGISTRO ATE)",
+                "410 502 ACCIONES FORMATIVAS Y PERFECCIONAMIENTO DE RR.HH.", "410 503 ACTIVIDADES PARA EL FORTALECIMIENTO DE LOS OBJETIVOS",
+                "410 601 IMPLEMENTOS DE LABORATORIO", "410 602 IMPLEMENTOS DEPORTIVOS", "410 603 INSTRUMENTOS MUSICALES Y ARTÍSTICOS",
+                "410 604 RECURSOS AUDIOVISUALES Y SOFTWARE EDUCATIVO", "410 605 MATERIAL Y RECURSOS DIDÁCTICOS", "410 606 BIBLIOTECAS, LIBROS Y REVISTAS",
+                "410 607 EVENTOS EDUCATIVOS Y CULTURALES", "410 608 EVALUACIÓN DIAGNÓSTICA", "410 609 OTROS GASTOS EN RECURSOS DE APRENDIZAJE",
+                "410 701 EQUIPOS DE FOTOGRAFÍA Y FILMACIÓN", "410 702 PIZARRAS INTERACTIVAS", "410 703 EQUIPOS INFORMÁTICOS Y LICENCIAS",
+                "410 704 EQUIPOS REPRODUCTORES DE IMAGEN", "410 705 EQUIPOS MULTICOPIADORES", "410 706 EQUIPOS DE AMPLIFICACIÓN Y SONIDO",
+                "410 707 OTROS GASTOS EN EQUIPAMIENTO DE APOYO PEDAGÓGICO", "410 801 UNIFORMES Y VESTUARIO", "410 802 OTROS GASTOS ALUMNOS",
+                "410 803 TALLERES EXTRAPROGRAMÁTICOS", "410 804 CONTRATACIÓN DE APOYO DE ESPECIALISTAS", "410 805 APOYO AL ESTUDIANTE",
+                "410 806 ÚTILES ESCOLARES", "410 901 TRANSPORTE ESCOLAR", "410 902 MATERIALES de oficina", "410 903 REPRODUCCIÓN DE DOCUMENTOS",
+                "410 904 ALIMENTACIÓN", "410 905 INSUMOS COMPUTACIONALES", "410 906 COMBUSTIBLE Y PEAJES", "410 907 MATERIALES Y ÚTILES DE ASEO",
+                "410 908 PUBLICIDAD", "410 909 PASAJES", "410 910 OTROS GASTOS DE OPERACIÓN", "411 001 INTERNET", "411 003 GAS",
+                "411 006 TELEFONÍA (MÓVIL Y FIJA)", "411 007 COMBUSTIBLE O FUENTE DE ENERGÍA PARA CALEFACCIÓN",
+                "411 103 CONTRATACIÓN OTROS SERVICIOS EXTERNOS", "411 501 ARRIENDO DE EQUIPOS INFORMÁTICOS", "411 502 ARRIENDO DE MAQUINARIAS Y EQUIPOS",
+                "411 503 ARRIENDO DE MOBILIARIO", "411 504 ARRIENDO DE OTROS BIENES MUEBLES", "411 601 MANTENIMIENTO Y REPARACIÓN DE INFRAESTRUCTURA",
+                "411 602 CONSTRUCCIÓN DE INFRAESTRUCTURA (OBRA GRUESA)", "411 603 TERMINACIONES DE INFRAESTRUCTURA",
+                "411 604 INSTALACIONES ELÉCTRICAS, ILUMINACIÓN Y SISTEMAS DE CALEFACCIÓN", "411 608 CIERRES PERIMETRALES Y OBRAS COMPLEMENTARIAS",
+                "411 610 ELIMINACIÓN DE BARRERAS ARQUITÉCTONICAS DE MENOR ENVERGADURA", "411 701 MANTENCIÓN Y REPARACIÓN DE BIENES MUEBLES",
+                "411 702 REPUESTOS, MANTENIMIENTO Y REPARACIÓN DE VEHÍCULOS", "411 703 MANTENCIÓN Y REPARACIÓN DE EQUIPOS COMPUTACIONALES",
+                "411 704 MANTENCIÓN Y REPARACIÓN DE MOBILIARIO ESCOLAR", "411 802 ADQUISICIÓN DE MOBILIARIO", "411 804 ADQUISICIÓN DE OTROS BIENES MUEBLES NO PEDAGÓGICOS"
+            ]
+        };
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .login-bg { background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%); }
+        .status-badge { padding: 4px 8px; border-radius: 6px; font-weight: bold; font-size: 10px; border: 1px solid; display: inline-block; width: 100%; text-align: center; }
+        .st-ingresado { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
+        .st-aprobado { background: #f0fdf4; color: #166534; border-color: #bbf7d0; }
+        .st-revision { background: #fffbeb; color: #92400e; border-color: #fef3c7; }
+        .st-rechazado { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+        .st-pagado { background: #f5f3ff; color: #5b21b6; border-color: #ddd6fe; }
+        .summary-card { border-left: 4px solid #3b82f6; background: white; padding: 12px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        textarea.expandable { min-height: 80px; resize: none; }
+        @media print { .no-print { display: none !important; } }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+
+    <div id="loading-overlay" class="fixed inset-0 bg-white z-[100] flex flex-col items-center justify-center">
+        <div class="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+        <p class="text-slate-500 font-bold text-xs uppercase tracking-widest">Iniciando Sistema Cormumel...</p>
+    </div>
+
+    <div id="login-screen" class="login-bg min-h-screen flex items-center justify-center p-4">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl w-full max-w-md">
+            <h1 class="text-2xl font-bold text-slate-800 text-center mb-2">Cormumel Cloud</h1>
+            <p class="text-slate-500 text-center text-sm mb-6">Gestión de Oficios Melipilla</p>
+            <div class="space-y-4">
+                <select id="login-type" class="w-full border rounded-xl px-4 py-3 outline-none" onchange="updateLoginDropdown()">
+                    <option value="">Seleccione Perfil...</option>
+                    <option value="admin">Administrador / Departamento</option>
+                    <option value="school">Establecimiento</option>
+                </select>
+                <div id="login-user-container" class="hidden">
+                    <select id="login-user" class="w-full border rounded-xl px-4 py-3 outline-none"></select>
+                </div>
+                <input type="password" id="login-pass" class="w-full border rounded-xl px-4 py-3 outline-none" placeholder="Contraseña">
+                <button onclick="handleLogin()" class="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 transition-all">Entrar</button>
+                <p id="login-error" class="text-red-500 text-xs text-center hidden font-bold">Error: Credenciales inválidas</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="main-dashboard" class="hidden flex flex-col min-h-screen">
+        <nav class="bg-white border-b px-6 py-4 flex justify-between items-center sticky top-0 z-50 shadow-sm no-print">
+            <div class="flex items-center space-x-3">
+                <div class="bg-blue-600 px-3 py-1 rounded text-white font-black text-sm">CORMUMEL</div>
+                <div>
+                    <h2 class="text-sm font-bold text-slate-800 leading-none" id="display-user-name">Usuario</h2>
+                    <p id="role-badge" class="text-[9px] text-blue-600 font-bold uppercase mt-1 tracking-wider"></p>
+                </div>
+            </div>
+            <button onclick="location.reload()" class="text-slate-400 hover:text-red-600 text-[10px] font-bold uppercase tracking-widest">Salir</button>
+        </nav>
+
+        <main class="p-4 md:p-8 max-w-[1900px] mx-auto w-full">
+            <div id="financial-summary" class="mb-6 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3"></div>
+
+            <div id="admin-panel" class="hidden mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200 no-print">
+                <h3 class="text-slate-800 font-bold mb-6 flex items-center gap-2">
+                    <span class="w-1.5 h-6 bg-blue-600 rounded-full"></span>
+                    Nuevo Registro de Oficio
+                </h3>
+                <form id="request-form" class="space-y-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div class="col-span-1 lg:col-span-2">
+                            <label class="text-[10px] font-bold text-slate-400 uppercase">Establecimiento</label>
+                            <select id="form-school" class="w-full border p-2.5 rounded-lg text-sm bg-slate-50 outline-none" onchange="updateSummaryOnSchoolChange()" required></select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-400 uppercase">N° Oficio</label>
+                            <input type="text" id="form-oficio" class="w-full border p-2.5 rounded-lg text-sm bg-slate-50" required>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-400 uppercase">Fecha Documento</label>
+                            <input type="date" id="form-fecha-doc" class="w-full border p-2.5 rounded-lg text-sm bg-slate-50" required>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-400 uppercase">Fecha Entrega</label>
+                            <input type="date" id="form-fecha-entrega" class="w-full border p-2.5 rounded-lg text-sm bg-slate-50" required>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-400 uppercase">Vía Financiamiento</label>
+                            <select id="form-finan" class="w-full border p-2.5 rounded-lg text-sm bg-slate-50 font-bold" onchange="togglePMEFields()" required></select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-400 uppercase">Monto $</label>
+                            <input type="number" id="form-monto" class="w-full border p-2.5 rounded-lg text-sm font-bold bg-white border-blue-200" required>
+                        </div>
+                    </div>
+
+                    <div id="pme-fields" class="hidden grid grid-cols-1 md:grid-cols-2 gap-4 bg-blue-50 p-4 rounded-xl border border-blue-100">
+                        <div>
+                            <label class="text-[10px] font-bold text-blue-800 uppercase">Dimensión PME</label>
+                            <select id="form-dimension" class="w-full border p-2.5 rounded-lg text-sm bg-white" onchange="updateSubdimensions()"></select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-bold text-blue-800 uppercase">Subdimensión PME</label>
+                            <select id="form-subdimension" class="w-full border p-2.5 rounded-lg text-sm bg-white"></select>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label class="text-[10px] font-bold text-slate-400 uppercase">Detalle Requerimiento</label>
+                        <textarea id="form-requerimiento" placeholder="Describa el requerimiento..." class="expandable w-full border p-2.5 rounded-lg text-sm bg-slate-50 outline-none" oninput="this.style.height = ''; this.style.height = this.scrollHeight + 'px'" required></textarea>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-400 uppercase">Tipo de Gasto</label>
+                            <select id="form-tipo-gasto" class="w-full border p-2.5 rounded-lg text-[11px] bg-slate-50" required></select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-bold text-slate-400 uppercase">Proyecto PAC</label>
+                            <input type="text" id="form-pac" class="w-full border p-2.5 rounded-lg text-sm bg-slate-50">
+                        </div>
+                    </div>
+
+                    <div class="flex justify-end">
+                        <button type="submit" class="bg-blue-600 text-white font-bold py-3 px-8 rounded-xl shadow-lg hover:bg-blue-700 transition-all">Registrar</button>
+                    </div>
+                </form>
+            </div>
+
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div class="p-6 border-b flex flex-wrap justify-between items-center gap-4 no-print">
+                    <h3 class="text-slate-800 font-bold text-lg">Registro Consolidado</h3>
+                    <div class="flex items-center gap-2">
+                        <button onclick="exportToPDF()" class="bg-red-50 text-red-700 px-4 py-2 rounded-lg text-xs font-bold hover:bg-red-100">Exportar PDF</button>
+                        <button onclick="exportToExcel()" class="bg-green-50 text-green-700 px-4 py-2 rounded-lg text-xs font-bold hover:bg-green-100">Excel</button>
+                    </div>
+                </div>
+
+                <div class="p-4 bg-slate-50 border-b flex flex-wrap gap-4 no-print">
+                    <select id="filter-school" onchange="renderTable()" class="flex-1 min-w-[200px] border rounded-lg p-2 text-xs bg-white"></select>
+                    <select id="filter-estado" onchange="renderTable()" class="flex-1 min-w-[150px] border rounded-lg p-2 text-xs bg-white"></select>
+                    <select id="filter-finan" onchange="renderTable()" class="flex-1 min-w-[150px] border rounded-lg p-2 text-xs bg-white"></select>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse" id="main-table">
+                        <thead>
+                            <tr class="text-[9px] font-black text-slate-400 uppercase bg-slate-50 border-b">
+                                <th class="px-4 py-3 border-r">RBD / Escuela</th>
+                                <th class="px-4 py-3 border-r">Oficio</th>
+                                <th class="px-4 py-3 border-r">Fecha</th>
+                                <th class="px-4 py-3 border-r">Vía</th>
+                                <th class="px-4 py-3 border-r text-right">Monto $</th>
+                                <th class="px-4 py-3 border-r">PME / Gasto</th>
+                                <th class="px-4 py-3 border-r">Detalle</th>
+                                <th class="px-4 py-3 border-r">Estado</th>
+                                <th class="px-4 py-3 no-print text-center">Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body" class="text-[10px] divide-y"></tbody>
+                        <tfoot>
+                            <tr class="bg-slate-100 font-bold text-slate-800">
+                                <td colspan="4" class="px-4 py-3 text-right text-xs uppercase">Total Filtrado:</td>
+                                <td class="px-4 py-3 text-right text-xs font-black text-blue-700" id="table-total-sum">$0</td>
+                                <td colspan="4"></td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
 </body>
 </html>
