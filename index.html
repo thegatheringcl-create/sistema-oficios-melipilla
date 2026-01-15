@@ -98,9 +98,8 @@
                 document.getElementById('loading-overlay').style.display = 'none';
             }, (error) => {
                 console.error("Error de lectura en Firestore:", error);
-                // Si hay error de permisos, mostrar mensaje útil
                 if (error.code === 'permission-denied') {
-                    console.error("Asegúrate de que las reglas de Firestore permitan lectura en: artifacts/" + appId + "/public/data/oficios");
+                    console.error("Error de permisos en Firestore");
                 }
             });
         }
@@ -341,7 +340,7 @@
     <script>
         const CONFIG = {
             admins: [
-                { name: "Claudio Jerez", pass: "Claudio2026" },
+                { name: "Claudio Jerez", pass: "12345" }, // ACTUALIZADO SEGÚN SOLICITUD
                 { name: "Sergio Pulgar", pass: "Sergio2026" },
                 { name: "Rodolfo Rojas", pass: "Rodolfo2026" },
                 { name: "Marco Toro", pass: "Marco2026" },
@@ -409,7 +408,7 @@
                 "410 806 ÚTILES ESCOLARES", "410 901 TRANSPORTE ESCOLAR", "410 902 MATERIALES de oficina", "410 903 REPRODUCCIÓN DE DOCUMENTOS",
                 "410 904 ALIMENTACIÓN", "410 905 INSUMOS COMPUTACIONALES", "410 906 COMBUSTIBLE Y PEAJES", "410 907 MATERIALES Y ÚTILES DE ASEO",
                 "410 908 PUBLICIDAD", "410 909 PASAJES", "410 910 OTROS GASTOS DE OPERACIÓN", "411 001 INTERNET", "411 003 GAS",
-                "411 006 TELEFONÍA (MÓVIL Y FIJA)", "411 007 COMBUSTIBLE O FUENTE DE ENERGÍA PARA CALEFACCIÓN",
+                "411 006 TELEFONÍA (MÓVIL Y FIJA)", "411 007 COMBUSTIBLE O FUENTE DE ENERGÍA PARA CALECAFCIÓN",
                 "411 103 CONTRATACIÓN OTROS SERVICIOS EXTERNOS", "411 501 ARRIENDO DE EQUIPOS INFORMÁTICOS", "411 502 ARRIENDO DE MAQUINARIAS Y EQUIPOS",
                 "411 503 ARRIENDO DE MOBILIARIO", "411 504 ARRIENDO DE OTROS BIENES MUEBLES", "411 601 MANTENIMIENTO Y REPARACIÓN DE INFRAESTRUCTURA",
                 "411 602 CONSTRUCCIÓN DE INFRAESTRUCTURA (OBRA GRUESA)", "411 603 TERMINACIONES DE INFRAESTRUCTURA",
